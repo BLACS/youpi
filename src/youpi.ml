@@ -214,8 +214,7 @@ let run cmd =
     print_endline (cmd ^ " failed with status " ^ (string_of_int status))
 
 let evalTest () =
-  let cmd =
-    "docker run --rm --name evaluator evaluator http://172.17.0.2:8080 test alice bob"
+  let cmd =(Printf.sprintf"docker run --rm --name evaluator evaluator %s test alice bob" apiUrl)
   in
   let t0 = Unix.gettimeofday () in
   (for i=1 to 5 do
