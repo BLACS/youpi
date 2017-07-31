@@ -1,249 +1,176 @@
-open BlacsTypes
+open Blacs
+ 
+type test = Write | Read | Time
 
-type requestType = Write | Read | Time | Hash
-
-exception ParseException of string
-
-exception ConnectionException
-
-exception TestException
+exception Test_failure
+  
+exception Connection_failure
 
 let pi = acos (-. 1.)
 
 let print str = print_string str; flush_all ()
 
+let iters = 100
+
 (** Normal Gauss distribution **)
 let g = fun mu sigma x ->
   let sigma2 = sigma ** 2. in
-  (1.  /.  sigma *. sqrt( 2. *. pi) *. exp (-. ((x -. mu) ** 2. ) /. (2. *. sigma2)))
+  (1.  /.  sigma *. sqrt( 2. *. pi) *.
+   exp (-. ((x -. mu) ** 2. ) /.
+           (2. *. sigma2)        ))
 
-let benchFunction iterations f  =
-  let rec aux i acc =
+let get_iterations iterations f =
+   let rec aux i acc =
     match i with
     | 0 -> acc
     | _ ->
       try
-        let time = f () in
-        aux (i-1) (time::acc)
+        aux (i-1) ((f ())::acc)
       with
-        ConnectionException -> aux (i-1) acc
-      | TestException       -> []
-  in
-  let timeList = aux iterations [] in
-  let measures = float_of_int (List.length timeList) in
-  let mu =
-    (List.fold_left ( +. ) 0. timeList) /. measures in
-  let sigma =
-    (List.fold_left (fun x y  -> ((x -. mu) ** 2.) +. y) 0. timeList) /. measures in
+        Test_failure         -> []
+      | Connection_failure   -> aux (i-1) acc
+   in
+   aux iterations []
+
+let normal_distribution l s =
+  let mu        = (List.fold_left ( +. ) 0. l)                     in
+  let sigma     =
+    (List.fold_left (fun x y -> ((x -. mu) ** 2.) +. y) 0. l) /. s in
   let g = g mu sigma in
-  let normalDistribution = List.map (fun x -> (g x, x)) timeList in
-  let max =
-    List.fold_left
-      (fun max x -> Pervasives.max max (Some (fst x))) None normalDistribution in
-  match max with
-    Some x -> List.assoc x normalDistribution
-  | None -> (- 1.0)
+  List.map (fun x -> (g x, x)) l
 
- 
-let args = List.tl (Array.to_list Sys.argv)
-
-let apiUrl = List.hd args
-
-let implementation = match args with _::name::_ -> name | _-> assert false
-
-(* let apiUrl = "https://virtserver.swaggerhub.com/blacs/pervasives/0.1" *)
-
-let skip = fun _ -> ()
-
-let sheetName = "noname"
-
-let readDir dirname =
-  let l = Array.to_list (Sys.readdir dirname) in
-  List.filter (fun str -> ".rq" = Str.last_chars str 3) l 
-
-let header = ["accept: application/json"; "content-type: application/json"]
-
-let makeUrl api typ getArgs =
-  let separator = "/" in
-  let func =
-    (function Write -> (separator ^"write")
-            | Read ->  (separator ^"read")
-            | Time ->  (separator ^"time")
-            | Hash -> "") typ in
-  apiUrl ^
-    func ^ separator ^ sheetName
-
-let httpConnection url writeFunction httpHeader =
-  let open Curl in
-  let connection = init () in
-  set_url connection url;
-  set_writefunction connection writeFunction;
-  set_httpheader connection httpHeader;
-  connection
-
-let postConnection url writeFunction httpHeader typ httpBody name =
-  let open Curl in
-  let connection = httpConnection url writeFunction httpHeader in
-  set_post connection true;
-  set_postfields connection httpBody;
-  connection
-
-
-let getConnection url writeFunction httpHeader typ getParams =
-  let open Curl in
-  let urlParams =
-    (function
-      None -> url
-    | Some params -> (url ^ "/" ^ params)) getParams in
-  let connection = httpConnection urlParams writeFunction httpHeader in
-  connection
-
-let makeConnection typ url writeFunction httpHeader httpBody name =
-  match typ,httpBody with
-    Write,Some(body) | Read,Some(body) ->
-    postConnection url writeFunction httpHeader typ body name
-  | Time,None ->
-    getConnection url writeFunction httpHeader typ None
-  | Hash,None ->
-    getConnection url writeFunction httpHeader typ (Some name)
-  | _ -> assert false
-
-let performConnection connection =
-  let open Curl in
-  perform connection;
-  get_responsecode connection
-let timeInServer connection =
-  let open Curl in
-  let connectTime      = get_connecttime connection       in
-  let startTransferTime = get_starttransfertime connection in
-  startTransferTime -. connectTime
-  
-let getHttpBody path =
-  try
-    let s = Yojson.Safe.from_file path |> Yojson.Safe.to_string in
-    s
-  with _ -> failwith "dldl"
-
-let expectedResponse name typ =
-  let len = String.length name in
-  let name = Str.string_before name (len-3) in
-  try
-    let response = 
-      match typ with
-        Write -> Yojson.Safe.from_file ("requests/write/" ^ name ^ "-response.json") 
-      | Read  -> Yojson.Safe.from_file ("requests/read/"  ^ name ^ "-response.json")
-      | Time ->  Yojson.Safe.from_file ("requests/time/"  ^ name ^ "-response.json")                   
-      | _ -> assert false in
-    Some response
-  with _ -> None
-
-let testConnection typ name httpBody bufSize  =
-  let url    = makeUrl apiUrl typ sheetName         in
-  let buffer = Buffer.create bufSize                in
-  let write  = fun data ->
-    Buffer.add_string buffer data;
-    String.length data                              in
-  let connection =
-    makeConnection typ url write header httpBody name          in
-  try
-    let responseCode = performConnection connection in
-    let time         = timeInServer connection      in
-    Curl.cleanup connection;
-    assert(200 = responseCode);
-    (Buffer.contents buffer,time)
-  with _ ->  raise ConnectionException
-
-
-let makeTest typ name expectedResponse httpBody bufSize () =
-  let response,time = testConnection typ name httpBody bufSize in
-  (match expectedResponse with
-     Some (re) ->
-     if (re =  (Yojson.Safe.from_string response))
-     then () else raise TestException
-  | None -> ());
-  time
-
-let writeTest = fun name ->
-  let body = getHttpBody ("requests/write/"^name) in
-  let expectedResponse = expectedResponse name Time in
-  makeTest Write name expectedResponse (Some body) 1 
-  
-
-let readTest name  =
-  let open ReadPromise in
-  let body = getHttpBody ("requests/read/"^name) in
-  let expectedResponse = expectedResponse name Read       in
-  let readHash () =
-    let readPromise =
-      try
-        match
-          (Yojson.Safe.from_string (fst (testConnection Read name (Some body) 1024))
-           |> of_yojson)
-        with
-          Result.Ok(rp) -> rp
-        | _ -> raise (ParseException "Cannot parse ReadPromise")
-      with
-      | ConnectionException -> raise ConnectionException
-    in
-    let wait =
-      (if readPromise.date > (Unix.gettimeofday ()) then
-        let t = (readPromise.date -. (Unix.gettimeofday ()) +. 0.05) in
-        Unix.sleepf t;
-        t
-      else 0.)
-    in
-    wait +. makeTest Hash readPromise.hash expectedResponse None 1024 ()
-  in
-  readHash
-  
+let max_elt l =
+   List.fold_left (fun max x -> Pervasives.max max (Some (fst x))) None l
     
-let timeTest         = fun name ->
-  let expectedResponse = expectedResponse name Time in
-  makeTest Time name expectedResponse None 128 
+let bench_function iterations f  =
+  let time_list = get_iterations iterations f            in
+  let measures  = float_of_int (iterations)              in
+  let nd        = normal_distribution time_list measures in
+  let max       = max_elt nd                             in 
+  match max with
+    Some x -> List.assoc x nd
+  | None   -> (- 1.0)
 
+let run_bench =  List.iter (fun f -> (Printf.printf "%f, " (bench_function iters f)))
 
-let writeRequests = readDir "requests/write"
+let directory_listing dirname =
+  let l = Array.to_list (Sys.readdir dirname) in
+  let p = fun x -> ".rq" = Filename.extension x in
+  List.filter p l
 
-let readRequests  = readDir "requests/read"
+let json path =
+  Yojson.Safe.from_file path
 
-let timeRequests  = readDir "requests/time"
-
-let run cmd =
-  let status = Sys.command cmd in
-  if status != 0 then
-    print_endline (cmd ^ " failed with status " ^ (string_of_int status))
-
-let evalTest () =
-  let cmd =(Printf.sprintf"docker run --rm --name evaluator evaluator %s test alice bob" apiUrl)
+let test_basename ty name = 
+  let dir = match ty with
+      Read  -> "requests/read/"
+    | Time  -> "requests/time/"
+    | Write -> "requests/write/"
   in
-  let t0 = Unix.gettimeofday () in
-  (for i=1 to 5 do
-    run cmd;
-  done);
-  let t1 = Unix.gettimeofday () in
-  (t1 -. t0) /. 5.
+  dir ^ name
+  
+let http_body ty name = match ty with
+    Time -> None
+  | _    ->  
+    let path  = (test_basename ty name) in
+    Some (Yojson.Safe.to_string (json path))
+
+let expected_response ty name =
+  let name = Filename.remove_extension name in
+  let path = (test_basename ty name) ^ "-response.json" in
+  if Sys.file_exists path then
+    Some (json path)
+  else
+    None
+
+let test_service ty test =
+  let body = http_body ty test in
+  let service = match ty,body with
+      Time,  None   -> get_time
+    | Read,  Some b -> read_and_hash b
+    | Write, Some b -> write b
+    | _ -> assert false 
+  in
+  let code,time,response = service () in
+  if 200 = code then
+    time, response
+  else
+    raise Connection_failure
+
+let make_test ty test expected_response () =
+  let time,response = test_service ty test in
+  match expected_response with
+    Some (re) ->
+    if (re =  (Yojson.Safe.from_string response))
+    then time else raise Test_failure
+  | None -> time
+
+let write_test test_name =
+  let expected_response = expected_response Write test_name in
+  make_test Write test_name expected_response 
+  
+let read_test test_name  =
+  let expected_response = expected_response Read test_name in
+  make_test Read test_name expected_response
+    
+let time_test test_name  =
+  let expected_response = expected_response Time test_name in
+  make_test Time test_name expected_response 
+
+let write_requests = directory_listing "requests/write"
+    
+let read_requests  = directory_listing "requests/read"
+
+let time_requests  = directory_listing "requests/time"
+
 
   
+let make_blacs_test ty name  = match ty with
+    Write -> write_test name
+  | Read  -> read_test  name
+  | Time  -> time_test  name
 
-let makeBlacsTest typ name  =
-  match typ with
-    Write -> writeTest name
-  | Read  ->  readTest name
-  | Time  -> timeTest  name
-  | _ -> assert false
+let random_write () =
+  let wrq = RandomSheet.(wrq 100 100 (generate 100 100 ())) in
+  let body = WriteRequest.write_request_to_json wrq in
+  let service = write body in
+  let code,time,response = service () in
+  if 200 = code then
+    time
+  else
+    raise Connection_failure
 
-let runBench = List.iter (fun x -> print (string_of_float (benchFunction 10 x)))
+let main () =
+  let make_write_test = make_blacs_test Write in
+  let make_read_test  = make_blacs_test Read  in
+  let make_time_test  = make_blacs_test Time  in
+  let write_tests     = List.map make_write_test write_requests in
+  let read_tests      = List.map make_read_test  read_requests  in
+  let time_tests      = List.map make_time_test  time_requests  in
+  Printf.printf "%s, " Blacs.implementation;
+  run_bench write_tests;
+  run_bench read_tests;
+  run_bench time_tests;
+  run_bench [random_write];
+  flush_all ()
 
-let () =
-  let makeWriteTest = makeBlacsTest Write in
-  let makeReadTest  = makeBlacsTest Read  in
-  let makeTimeTest  = makeBlacsTest Time  in
-  let writeTests    = List.map makeWriteTest writeRequests in
-  let readTests     = List.map makeReadTest  readRequests  in
-  let timeTests     = List.map makeTimeTest  timeRequests  in
-  print implementation; print ", ";
-  runBench writeTests;print ", ";
-  runBench readTests; print ", ";
-  runBench timeTests; print ", ";
-  runBench [evalTest]
-  
+
+let () = main ()
+
+
+(* let run cmd = *)
+(*   let status = Sys.command cmd in *)
+(*   if status != 0 then *)
+(*     print_endline (cmd ^ " failed with status " ^ (string_of_int status)) *)
+
+(* let eval_test name () = *)
+(*   let cmd = *)
+(*     Printf.sprintf "docker run --rm --name  %s-%s %s %s test alice bob" *)
+(*       name Blacs.implementation name Blacs.host *)
+(*   in *)
+(*   let t_0 = Unix.gettimeofday () in *)
+(*   (for i=1 to 5 do *)
+(*     run cmd; *)
+(*   done); *)
+(*   let t_1 = Unix.gettimeofday () in *)
+(*   (t_1 -. t_0) /. 5. *)

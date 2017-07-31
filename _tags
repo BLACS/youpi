@@ -1,2 +1,2 @@
 <src>: include
-<src/*>: package(unix), package(ppx_deriving_yojson), package(curl), package(str)
+true: package(unix), package(ppx_deriving_yojson), package(curl), package(str), package(blacsapi)
